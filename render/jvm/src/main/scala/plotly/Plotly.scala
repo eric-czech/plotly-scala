@@ -28,7 +28,7 @@ object Plotly {
     printer.render(json)
   }
 
-  def jsSnippet(div: String, data: Seq[Trace], layout: Layout): String = {
+  def jsSnippet(div: String, data: Seq[Trace], layout: Layout, callbacks: String = ""): String = {
 
     val b = new StringBuilder
 
@@ -47,7 +47,7 @@ object Plotly {
     b ++= printer.render(layout.asJson)
     b ++= ";\n\n  Plotly.plot('"
     b ++= div.replaceAll("'", "\\'")
-    b ++= "', data, layout);\n"
+    b ++= s"', data, layout)$callbacks;\n"
 
     b ++= "})();"
 

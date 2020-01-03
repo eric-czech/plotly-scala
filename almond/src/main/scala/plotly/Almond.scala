@@ -2,7 +2,7 @@ package plotly
 
 import java.lang.{Boolean => JBoolean, Double => JDouble, Integer => JInt}
 
-import almond.interpreter.api.{DisplayData, OutputHandler}
+import almond.interpreter.api.{CommHandler, CommTarget, DisplayData, OutputHandler}
 
 import scala.util.Random
 import plotly.element._
@@ -95,8 +95,79 @@ object Almond {
     div0
   }
 
+  def embedJs(
+              data: Seq[Trace],
+              layout: Layout
+            )(implicit
+              publish: OutputHandler,
+              commHandler: CommHandler
+            ): Unit = {
+
+    // Create random ids for the plot div and display output
+    val div0 = randomDiv()
+    val cid0 = randomDiv()
+
+    // Define callbacks for post plotting static image renders that remove the original plot and return plot image data
+    // Note: for reference on frontend <-> kernel communication, see:
+    // https://github.com/almond-sh/almond/blob/master/modules/shared/interpreter-api/src/main/scala/almond/interpreter/api/CommHandler.scala#L18
+    // http://ipython.org/ipython-doc/stable/api/generated/IPython.kernel.comm.manager.html
+    val callbacks =
+      """
+        |.then((gd) => {
+        |  return Plotly.toImage(gd, {height:%d, width:%d});
+        |}).then((url) => {
+        |  Plotly.d3.select('#%s').remove();
+        |  var comm = Jupyter.notebook.kernel.comm_manager.new_comm('plot_embed');
+        |  comm.open()
+        |  comm.send(url)
+        |  comm.close()
+        |  Jupyter.notebook.kernel.comm_manager.unregister_comm('plot_embed');
+        |})
+        |""".stripMargin.format(layout.height.getOrElse(500), layout.width.getOrElse(1000), div0)
+
+    val js =
+      s"""require(['plotly'], function(Plotly) {
+         |  ${Plotly.jsSnippet(div0, data, layout, callbacks)}
+         |});
+      """.stripMargin
+
+    // Register a communication handler that will receive the encoded base64 image from
+    // the frontend via the Plotly JS api and then replace the display output using this data;
+    // see: https://github.com/almond-sh/almond/blob/master/modules/shared/interpreter-api/src/main/scala/almond/interpreter/api/CommHandler.scala#L18
+    commHandler.unregisterCommTarget("plot_embed")
+    commHandler.registerCommTarget(
+      "plot_embed",
+      CommTarget { (_, data) =>
+        // Note: image data URLs from Plotly.js are prefixed and suffixed by double quotes
+        // for substitution as img tag src values, hence the replacement below that removes them
+        publish.updateDisplay(DisplayData(
+          data = Map("image/png" -> new String(data, "UTF-8")
+            .replace("data:image/png;base64,", "")
+            .replace("\"", "")),
+          idOpt = Some(cid0)
+        ))
+      }
+    )
+
+    // The id for this display must match that of the display output to be updated above
+    publish.display(DisplayData(
+      data = Map("text/html" -> s"""<div class="chart" id="$div0" style="display: none;"></div><script>$js</script>"""),
+      idOpt = Some(cid0)
+    ))
+  }
+
   def randomDiv(): String =
     almond.api.helpers.Display.newDiv("plot-")
+
+  def initializeIfNecessary()(implicit publish: OutputHandler): Unit = {
+    if (!Internal.initialized)
+      Internal.synchronized {
+        if (!Internal.initialized) {
+          init()
+          Internal.initialized = true
+        }
+      }
+  }
 
   def plot(
     data: Seq[Trace],
@@ -105,16 +176,19 @@ object Almond {
   )(implicit
     publish: OutputHandler
   ): String = {
-
-    if (!Internal.initialized)
-      Internal.synchronized {
-        if (!Internal.initialized) {
-          init()
-          Internal.initialized = true
-        }
-      }
-
+    initializeIfNecessary
     plotJs(data, layout)
+  }
+
+  def embed(
+            data: Seq[Trace],
+            layout: Layout = Layout()
+          )(implicit
+            publish: OutputHandler,
+            commHandler: CommHandler
+          ): Unit = {
+    initializeIfNecessary
+    embedJs(data, layout)
   }
 
   implicit class DataOps(val data: Trace) extends AnyVal {
@@ -189,6 +263,13 @@ object Almond {
       publish: OutputHandler
     ): String =
       Almond.plot(Seq(data), layout, div = div)
+
+    def embed(
+      layout: Layout = Layout()
+    )(implicit
+      publish: OutputHandler,
+      commHandler: CommHandler
+    ): Unit = Almond.embed(Seq(data), layout)
   }
 
   implicit class DataSeqOps(val data: Seq[Trace]) extends AnyVal {
@@ -262,6 +343,13 @@ object Almond {
       publish: OutputHandler
     ): String =
       Almond.plot(data, layout, div = div)
+
+    def embed(
+       layout: Layout = Layout()
+     )(implicit
+       publish: OutputHandler,
+       commHandler: CommHandler
+     ): Unit = Almond.embed(data, layout)
   }
 
 }
